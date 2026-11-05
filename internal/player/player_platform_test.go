@@ -2,6 +2,7 @@ package player
 
 import (
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -36,22 +37,77 @@ func TestAppendQueue(t *testing.T) {
 	}
 }
 
-// Songs that cannot play stop the player after a few in a row, instead of
-// flying through the whole queue: a NAS gone away failed every song, which
-// skipped one after another.
-func TestFailedLoadsStopAfterAFew(t *testing.T) {
+func TestManualTrackLoadFailureKeepsSelection(t *testing.T) {
+	queue := []netease.Track{{ID: 1, Name: "before"}, {ID: 2, Name: "selected"}, {ID: 3, Name: "after"}}
+	for _, tc := range []struct {
+		name        string
+		err         error
+		selectTrack func(*Player)
+	}{
+		{"list", errors.New("stream request failed"), func(p *Player) { p.PlayQueue(queue, 1) }},
+		{"shuffled list", errors.New("stream request failed"), func(p *Player) {
+			p.shuffle = true
+			p.PlayQueue(queue, 1)
+		}},
+		{"queue jump", netease.ErrUnavailable, func(p *Player) { p.Jump(1) }},
+		{"next button", errors.New("stream request failed"), func(p *Player) { p.Next() }},
+		{"restore", errors.New("stream request failed"), func(p *Player) {
+			p.Restore(Session{Queue: queue, Order: []int{0, 1, 2}, At: 1})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ch := make(chan func(), 64)
+			p := &Player{post: func(fn func()) { ch <- fn }, at: -1}
+			p.Artwork = func(*netease.Track) ([]byte, error) { return nil, nil }
+			p.ResolveLyrics = func(*netease.Track) (string, string, string, error) { return "", "", "", nil }
+			var requested []int64
+			p.ResolveStream = func(track *netease.Track, _ string) (*netease.Stream, error) {
+				requested = append(requested, track.ID)
+				return nil, tc.err
+			}
+			p.Cue(queue)
+			tc.selectTrack(p)
+			deadline := time.NewTimer(2 * time.Second)
+			defer deadline.Stop()
+			for p.Loading() {
+				select {
+				case fn := <-ch:
+					fn()
+				case <-deadline.C:
+					t.Fatal("selected track never finished loading")
+				}
+			}
+			if p.Current().ID != 2 || !slices.Equal(requested, []int64{2}) {
+				t.Fatalf("selection replaced after failure: current=%d requested=%v", p.Current().ID, requested)
+			}
+			if p.Playing() || p.Err() == "" {
+				t.Fatalf("failed selection must stop with its error: playing=%v err=%q", p.Playing(), p.Err())
+			}
+			if tc.err != netease.ErrUnavailable && p.Err() != tc.err.Error() {
+				t.Fatalf("selected track error lost: %q", p.Err())
+			}
+		})
+	}
+}
+
+// Automatic playback stops after bounded consecutive failures rather than
+// skipping through an entire unavailable library.
+func TestAutomaticFailedLoadsStopAfterAFew(t *testing.T) {
 	ch := make(chan func(), 64)
-	p := New(func(fn func()) { ch <- fn })
-	tried := 0
-	p.ResolveStream = func(*netease.Track, string) (*netease.Stream, error) {
-		tried++
+	p := &Player{post: func(fn func()) { ch <- fn }, at: -1}
+	p.Artwork = func(*netease.Track) ([]byte, error) { return nil, nil }
+	p.ResolveLyrics = func(*netease.Track) (string, string, string, error) { return "", "", "", nil }
+	var requested []int64
+	p.ResolveStream = func(track *netease.Track, _ string) (*netease.Stream, error) {
+		requested = append(requested, track.ID)
 		return nil, errors.New("gone")
 	}
 	queue := make([]netease.Track, 10)
 	for i := range queue {
 		queue[i] = netease.Track{ID: int64(i + 1), Name: "song", Duration: 1000}
 	}
-	p.PlayQueue(queue, 0)
+	p.Cue(queue)
+	p.ended()
 	for p.Loading() {
 		select {
 		case fn := <-ch:
@@ -60,7 +116,7 @@ func TestFailedLoadsStopAfterAFew(t *testing.T) {
 			t.Fatal("still loading")
 		}
 	}
-	if tried != maxSkipped || p.Playing() || p.Err() == "" {
-		t.Fatalf("tried %d songs, playing=%v err=%q", tried, p.Playing(), p.Err())
+	if !slices.Equal(requested, []int64{2, 3, 4}) || p.Current().ID != 4 || p.Playing() || p.Err() != "gone" {
+		t.Fatalf("automatic failure limit: requested=%v current=%d playing=%v err=%q", requested, p.Current().ID, p.Playing(), p.Err())
 	}
 }

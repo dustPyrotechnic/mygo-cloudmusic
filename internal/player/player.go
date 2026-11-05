@@ -186,7 +186,7 @@ func (p *Player) ended() {
 		p.sync()
 		return
 	}
-	p.Next()
+	p.next(min(len(p.order), maxSkipped) - 1)
 }
 
 // PlayQueue replaces the queue with tracks and plays the one at start.
@@ -295,7 +295,7 @@ func (p *Player) refill() {
 		case !p.awaiting:
 		case p.at+1 < len(p.order):
 			p.awaiting = false
-			p.load(p.at + 1)
+			p.loadSkipping(p.at+1, min(len(p.order), maxSkipped)-1, true, 0)
 		default:
 			// The radio has nothing more: it stops at its end.
 			p.awaiting, p.playing = false, false
@@ -423,6 +423,10 @@ func (p *Player) OpenAudio() (Audio, error) {
 func (p *Player) PlayOrder() ([]int, int) { return p.order, p.at }
 
 func (p *Player) Next() {
+	p.next(0)
+}
+
+func (p *Player) next(remaining int) {
 	if len(p.order) == 0 {
 		return
 	}
@@ -435,7 +439,7 @@ func (p *Player) Next() {
 		}
 		at = 0
 	}
-	p.load(at)
+	p.loadSkipping(at, remaining, true, 0)
 }
 
 // Prev plays the track before this one, however far this one has played:
@@ -794,14 +798,14 @@ func (p *Player) stop() {
 	p.fade.attach(nil, 1)
 }
 
-// load plays the track at order[at], skipping those that cannot play.
+// load plays the selected track without replacing it if loading fails.
 func (p *Player) load(at int) {
 	p.loadSkipping(at, 0, true, 0)
 }
 
-// loadSkipping loads the track at order[at], to play or not, from from,
-// skipping those that cannot play: skipped of them so far.
-func (p *Player) loadSkipping(at, skipped int, play bool, from time.Duration) {
+// loadSkipping loads the track at order[at], to play or not, from from.
+// Only automatic continuation grants a budget of remaining tracks to skip.
+func (p *Player) loadSkipping(at, remaining int, play bool, from time.Duration) {
 	p.stop()
 	p.gen++
 	gen := p.gen
@@ -862,15 +866,14 @@ func (p *Player) loadSkipping(at, skipped int, play bool, from time.Duration) {
 				default:
 					p.err = "这首歌需要 VIP 才能播放"
 				}
-				// Skip what cannot play, unless nothing in the queue can, or
-				// a few in a row could not: a NAS gone away fails every
-				// song, which then flew by one after another.
-				if skipped+1 < min(len(p.order), maxSkipped) {
+				// A manual selection keeps its own error. Automatic continuation
+				// may skip a bounded number of failures.
+				if remaining > 0 {
 					next := at + 1
 					if next >= len(p.order) {
 						next = 0
 					}
-					p.loadSkipping(next, skipped+1, p.playing, 0)
+					p.loadSkipping(next, remaining-1, p.playing, 0)
 				} else {
 					p.playing = false
 					p.sync()
