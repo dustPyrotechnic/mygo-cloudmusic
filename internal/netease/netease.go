@@ -390,7 +390,10 @@ func ArtistLatestSongs(id int64, limit int) ([]Track, error) {
 	return SongDetails(ids)
 }
 
-var ErrUnavailable = errors.New("this song isn't available to stream")
+var (
+	ErrUnavailable = errors.New("this song isn't available to stream")
+	errNoSongAudio = errors.New("网易云暂未返回可用音源，请稍后重试")
+)
 
 // Stream is where a track streams from, and what it is.
 type Stream struct {
@@ -418,46 +421,61 @@ func Lossless(level string) bool { return level == "lossless" || level == "hires
 // Levels) or the best below it the listener may play. It goes through
 // the eapi, which carries the session, so VIP songs play for subscribers.
 func SongURL(id int64, level string) (*Stream, error) {
-	var res struct {
-		Code int `json:"code"`
-		Data []struct {
-			Stream
-			URL           string          `json:"url"`
-			Peak          *float64        `json:"peak"`
-			FreeTrialInfo json.RawMessage `json:"freeTrialInfo"`
-		} `json:"data"`
-	}
 	encode := "mp3"
 	if Lossless(level) {
 		encode = "flac"
 	}
 	data := map[string]any{"ids": fmt.Sprintf("[%d]", id), "level": level, "encodeType": encode}
-	if err := eapiPost("/api/song/enhance/player/url/v1", data, &res); err != nil {
-		return nil, err
+	for attempt := 0; ; attempt++ {
+		var res struct {
+			apiError
+			Data []struct {
+				Stream
+				URL           string          `json:"url"`
+				Peak          *float64        `json:"peak"`
+				FreeTrialInfo json.RawMessage `json:"freeTrialInfo"`
+			} `json:"data"`
+		}
+		if err := eapiPost("/api/song/enhance/player/url/v1", data, &res); err != nil {
+			return nil, err
+		}
+		if res.Code == -460 && attempt == 0 {
+			// An intermittent risk response is not a song permission failure.
+			// Retry once at the same quality, without replacing the selected song.
+			time.Sleep(300 * time.Millisecond)
+			continue
+		}
+		if res.Code != 200 {
+			message := res.Message
+			if message == "" {
+				message = res.Msg
+			}
+			return nil, fmt.Errorf("netease: song URL: code %d %s", res.Code, message)
+		}
+		if len(res.Data) == 0 || res.Data[0].URL == "" {
+			return nil, errNoSongAudio
+		}
+		d := res.Data[0]
+		// A preview of a VIP song is no song.
+		if len(d.FreeTrialInfo) > 0 && string(d.FreeTrialInfo) != "null" {
+			return nil, ErrUnavailable
+		}
+		s := d.Stream
+		s.Type = strings.ToLower(s.Type)
+		if s.Type != "" && s.Type != "mp3" && s.Type != "flac" {
+			return nil, fmt.Errorf("unsupported format %s", s.Type)
+		}
+		if d.Peak != nil {
+			s.Peak = *d.Peak
+		}
+		// The level names the song's file in the cache: one not of Levels is
+		// taken for the one asked for.
+		if !slices.Contains(Levels, s.Level) {
+			s.Level = level
+		}
+		s.URL = strings.Replace(d.URL, "http://", "https://", 1)
+		return &s, nil
 	}
-	if len(res.Data) == 0 || res.Data[0].URL == "" {
-		return nil, ErrUnavailable
-	}
-	d := res.Data[0]
-	// A preview of a VIP song is no song.
-	if len(d.FreeTrialInfo) > 0 && string(d.FreeTrialInfo) != "null" {
-		return nil, ErrUnavailable
-	}
-	s := d.Stream
-	s.Type = strings.ToLower(s.Type)
-	if s.Type != "" && s.Type != "mp3" && s.Type != "flac" {
-		return nil, fmt.Errorf("unsupported format %s", s.Type)
-	}
-	if d.Peak != nil {
-		s.Peak = *d.Peak
-	}
-	// The level names the song's file in the cache: one not of Levels is
-	// taken for the one asked for.
-	if !slices.Contains(Levels, s.Level) {
-		s.Level = level
-	}
-	s.URL = strings.Replace(d.URL, "http://", "https://", 1)
-	return &s, nil
 }
 
 // Lyrics returns a track's timed lyrics, their translation if any, and
