@@ -17,17 +17,17 @@ import (
 var ErrUnavailable = errors.New("mpv: library not found or cannot be loaded")
 
 type cFuncs struct {
-	create            func() uintptr
-	initialize        func(handle uintptr) int
-	terminateDestroy  func(handle uintptr)
-	command           func(handle uintptr, cmd **byte) int
-	commandString     func(handle uintptr, cmd *byte) int
-	setOptionString   func(handle uintptr, name, value *byte) int
-	setPropertyString func(handle uintptr, name, value *byte) int
-	getPropertyString func(handle uintptr, name *byte) *byte
-	free              func(ptr unsafe.Pointer)
-	waitEvent         func(handle uintptr, timeout float64) *cEvent
-	wakeup            func(handle uintptr)
+	create             func() uintptr
+	initialize         func(handle uintptr) int
+	terminateDestroy   func(handle uintptr)
+	command            func(handle uintptr, cmd **byte) int
+	commandString      func(handle uintptr, cmd *byte) int
+	setOptionString    func(handle uintptr, name, value *byte) int
+	setPropertyString  func(handle uintptr, name, value *byte) int
+	getPropertyString  func(handle uintptr, name *byte) *byte
+	free               func(ptr unsafe.Pointer)
+	waitEvent          func(handle uintptr, timeout float64) *cEvent
+	wakeup             func(handle uintptr)
 	requestLogMessages func(handle uintptr, minLevel *byte) int
 }
 
@@ -95,74 +95,130 @@ func Load() error {
 		return nil
 	}
 
-	// 1. Check downloaded library in cache
+	readinessMu.Lock()
+	defer readinessMu.Unlock()
+
+	failures := []error{ErrUnavailable}
 	if p, err := TargetFile(); err == nil {
-		if err := loadLibraryAt(p); err == nil {
+		if err := cachedProbe(p); err != nil {
+			failures = append(failures, err)
+		} else if err := loadLibraryAt(p); err == nil {
 			loaded = true
 			return nil
+		} else {
+			failures = append(failures, err)
 		}
+	} else {
+		failures = append(failures, err)
 	}
 
-	// 2. Check system-installed candidate paths
 	for _, name := range SystemLibNames() {
+		if runtime.GOOS == "darwin" {
+			if err := cachedProbe(name); err != nil {
+				failures = append(failures, err)
+				continue
+			}
+		}
 		if err := loadLibraryAt(name); err == nil {
 			loaded = true
 			return nil
+		} else {
+			failures = append(failures, err)
 		}
 	}
 
-	return ErrUnavailable
+	return errors.Join(failures...)
 }
 
 // LoadPath loads libmpv explicitly from the specified file path.
 func LoadPath(libPath string) error {
 	loadMu.Lock()
 	defer loadMu.Unlock()
+	if runtime.GOOS == "darwin" {
+		if err := probeLibrary(libPath); err != nil {
+			return errors.Join(ErrUnavailable, err)
+		}
+	}
 
 	if err := loadLibraryAt(libPath); err != nil {
-		return err
+		return errors.Join(ErrUnavailable, err)
 	}
 	loaded = true
 	return nil
 }
 
 func loadLibraryAt(path string) error {
-	h, err := openLibrary(path)
-	if err != nil || h == 0 {
-		return fmt.Errorf("open library %s: %w", path, err)
+	_, funcs, err := openMPVLibrary(path)
+	if err != nil {
+		return err
 	}
-
-	symbols := map[string]any{
-		"mpv_create":                &mpvLib.create,
-		"mpv_initialize":            &mpvLib.initialize,
-		"mpv_terminate_destroy":     &mpvLib.terminateDestroy,
-		"mpv_command":               &mpvLib.command,
-		"mpv_command_string":        &mpvLib.commandString,
-		"mpv_set_option_string":     &mpvLib.setOptionString,
-		"mpv_set_property_string":   &mpvLib.setPropertyString,
-		"mpv_get_property_string":   &mpvLib.getPropertyString,
-		"mpv_free":                  &mpvLib.free,
-		"mpv_wait_event":            &mpvLib.waitEvent,
-		"mpv_wakeup":                &mpvLib.wakeup,
-		"mpv_request_log_messages":  &mpvLib.requestLogMessages,
-	}
-
-	for symName, fnPtr := range symbols {
-		sym, err := librarySymbol(h, symName)
-		if err != nil || sym == 0 {
-			return fmt.Errorf("missing symbol %s in %s", symName, path)
-		}
-		purego.RegisterFunc(fnPtr, sym)
-	}
-
+	// 全部符号绑定成功后再提交；使用中的库句柄保留到进程退出。
+	mpvLib = funcs
 	return nil
+}
+
+func probeLibraryLocal(path string) error {
+	h, _, err := openMPVLibrary(path)
+	if err != nil {
+		return err
+	}
+	if err := closeLibrary(h); err != nil {
+		return fmt.Errorf("mpv: close probe %s: %w", path, err)
+	}
+	return nil
+}
+
+func openMPVLibrary(path string) (handle uintptr, funcs cFuncs, err error) {
+	handle, err = openLibrary(path)
+	if err != nil {
+		return 0, funcs, fmt.Errorf("mpv: open library %s: %w", path, err)
+	}
+	if handle == 0 {
+		return 0, funcs, fmt.Errorf("mpv: open library %s: empty handle", path)
+	}
+	defer func() {
+		if err != nil {
+			err = errors.Join(err, closeLibrary(handle))
+			handle = 0
+		}
+	}()
+
+	symbols := [...]struct {
+		name string
+		fn   any
+	}{
+		{"mpv_create", &funcs.create},
+		{"mpv_initialize", &funcs.initialize},
+		{"mpv_terminate_destroy", &funcs.terminateDestroy},
+		{"mpv_command", &funcs.command},
+		{"mpv_command_string", &funcs.commandString},
+		{"mpv_set_option_string", &funcs.setOptionString},
+		{"mpv_set_property_string", &funcs.setPropertyString},
+		{"mpv_get_property_string", &funcs.getPropertyString},
+		{"mpv_free", &funcs.free},
+		{"mpv_wait_event", &funcs.waitEvent},
+		{"mpv_wakeup", &funcs.wakeup},
+		{"mpv_request_log_messages", &funcs.requestLogMessages},
+	}
+	for _, symbol := range symbols {
+		addr, symbolErr := librarySymbol(handle, symbol.name)
+		if symbolErr != nil {
+			return handle, funcs, fmt.Errorf("mpv: symbol %s in %s: %w", symbol.name, path, symbolErr)
+		}
+		if addr == 0 {
+			return handle, funcs, fmt.Errorf("mpv: missing symbol %s in %s", symbol.name, path)
+		}
+		purego.RegisterFunc(symbol.fn, addr)
+	}
+	return handle, funcs, nil
 }
 
 // Instance wraps a running libmpv instance handle.
 type Instance struct {
-	mu     sync.Mutex
-	handle uintptr
-	closed bool
+	mu      sync.Mutex
+	eventMu sync.Mutex // 事件数据读完后才允许销毁底层句柄。
+	handle  uintptr
+	closed  bool
 }
 
 // NewInstance creates and configures a new MPV instance for audio playback.
@@ -228,15 +284,19 @@ func NewInstance(opts ...map[string]string) (*Instance, error) {
 // Close destroys the MPV instance.
 func (inst *Instance) Close() {
 	inst.mu.Lock()
-	defer inst.mu.Unlock()
-
 	if inst.closed || inst.handle == 0 {
+		inst.mu.Unlock()
 		return
 	}
 	inst.closed = true
-	mpvLib.wakeup(inst.handle)
-	mpvLib.terminateDestroy(inst.handle)
+	h := inst.handle
 	inst.handle = 0
+	mpvLib.wakeup(h)
+	inst.mu.Unlock()
+
+	inst.eventMu.Lock()
+	defer inst.eventMu.Unlock()
+	mpvLib.terminateDestroy(h)
 }
 
 // SetOption sets an MPV option before or after initialization.
@@ -322,6 +382,8 @@ func (inst *Instance) CommandString(cmd string) int {
 
 // WaitEvent blocks for up to timeout seconds waiting for an MPV event.
 func (inst *Instance) WaitEvent(timeout float64) (eventID uint32, errCode int32, endReason EndFileReason) {
+	inst.eventMu.Lock()
+	defer inst.eventMu.Unlock()
 	inst.mu.Lock()
 	h := inst.handle
 	inst.mu.Unlock()

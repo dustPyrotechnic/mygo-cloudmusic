@@ -48,13 +48,17 @@ func (a *app) startMPVDownload() {
 				a.mpvTotal = total
 			})
 		})
+		if err == nil {
+			if loadErr := mpv.Load(); loadErr != nil {
+				err = fmt.Errorf("组件加载失败: %w", loadErr)
+			}
+		}
 		a.post(func() {
 			a.mpvDownloading = false
 			a.mpvCancel = nil
 			if err == nil {
-				_ = mpv.Load()
+				a.toast = "高级解码组件已就绪"
 				a.syncMPVSettings()
-				a.toast = "高级解码组件下载完成"
 			} else if ctx.Err() == nil {
 				a.toast = fmt.Sprintf("下载失败: %v", err)
 			}
@@ -77,10 +81,14 @@ func (a *app) deleteMPV() {
 		a.pl.SetUseMPV(false)
 	}
 	a.settings.UseMPV = false
-	_ = mpv.Delete()
+	err := mpv.Delete()
 	a.changed()
 	a.syncMPVSettings()
-	a.toast = "已删除高级解码组件"
+	if err != nil {
+		a.toast = fmt.Sprintf("删除组件失败: %v", err)
+	} else {
+		a.toast = "已删除高级解码组件"
+	}
 }
 
 func (a *app) scanDLNADevices() {
@@ -107,9 +115,21 @@ func (a *app) scanDLNADevices() {
 // renderHifiSettings renders the "高级音频与硬件解码" section into any settings page (both NetEase and third-party platforms).
 func (a *app) renderHifiSettings(c *ui.Context, group func(title string, rows func()), row func(key, label, desc string, control func())) {
 	s := &a.settings
+	downloaded := mpv.IsDownloaded()
+	systemPath := ""
+	if !downloaded {
+		systemPath = mpv.SystemPath()
+	}
+	ready := downloaded || systemPath != ""
 	group("高级音频与硬件解码", func() {
 		row("hifi-mpv-toggle", "高级解码引擎 (MPV)", "基于 MPV 的发烧级解码引擎，支持 DSD (DSF/DFF)、APE、ALAC、AAC、Hi-Res FLAC 全格式直接硬件输出", func() {
-			if ui.Switch(c.Key("use-mpv"), &s.UseMPV).Label("高级解码引擎").Disabled(!a.mpvReady()).Changed() {
+			if ui.Switch(c.Key("use-mpv"), &s.UseMPV).Label("高级解码引擎").Disabled(!ready).Changed() {
+				if s.UseMPV {
+					if err := mpv.Load(); err != nil {
+						s.UseMPV = false
+						a.toast = fmt.Sprintf("组件加载失败: %v", err)
+					}
+				}
 				a.changed()
 				a.syncMPVSettings()
 			}
@@ -119,12 +139,12 @@ func (a *app) renderHifiSettings(c *ui.Context, group func(title string, rows fu
 		switch {
 		case a.mpvDownloading:
 			statusDesc = fmt.Sprintf("正在下载 libmpv (%s / %s)...", megabytes(a.mpvDone), megabytes(a.mpvTotal))
-		case mpv.IsDownloaded():
+		case downloaded:
 			statusDesc = "组件已就绪 (独立组件已缓存)"
-		case mpv.SystemPath() != "":
-			statusDesc = "系统已安装 libmpv (" + filepath.Base(mpv.SystemPath()) + ")，亦可下载独立组件"
+		case systemPath != "":
+			statusDesc = "系统已安装 libmpv (" + filepath.Base(systemPath) + ")，亦可下载独立组件"
 		default:
-			statusDesc = "未下载组件，下载后即可开启高级解码引擎"
+			statusDesc = "组件未安装或无法加载，可重新下载修复"
 		}
 
 		row("hifi-mpv-status", "解码组件状态", statusDesc, func() {
@@ -133,7 +153,7 @@ func (a *app) renderHifiSettings(c *ui.Context, group func(title string, rows fu
 				if ui.Button(c.Key("mpv-dl"), "取消").Clicked() {
 					a.cancelMPVDownload()
 				}
-			case mpv.IsDownloaded():
+			case downloaded:
 				if ui.Button(c.Key("mpv-dl"), "删除组件").Clicked() {
 					a.deleteMPV()
 				}
@@ -144,7 +164,7 @@ func (a *app) renderHifiSettings(c *ui.Context, group func(title string, rows fu
 			}
 		})
 
-		if s.UseMPV && a.mpvReady() {
+		if s.UseMPV && ready {
 			devices := a.pl.AudioDevices()
 			if len(devices) > 0 {
 				var devLabels []string
