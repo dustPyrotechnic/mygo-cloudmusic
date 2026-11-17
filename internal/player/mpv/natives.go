@@ -4,7 +4,7 @@ import (
 	"runtime"
 )
 
-// LibVersion is the target MPV library version for downloaded assets.
+// LibVersion 保留旧单库资源及缓存根目录版本；macOS 完整包独立固定来源与哈希。
 const LibVersion = "0.38.0"
 
 type nativeFile struct {
@@ -14,6 +14,8 @@ type nativeFile struct {
 	GzSize   int64
 	SHA256   string
 	GzSHA256 string
+	Bundle   bool
+	URL      string
 }
 
 // SystemLibNames returns candidate dynamic library names for the current OS.
@@ -81,18 +83,22 @@ var NativeAssets = map[string]nativeFile{
 	},
 	"darwin-arm64": {
 		Name:     "libmpv.dylib",
-		Asset:    "darwin-arm64-libmpv.dylib.gz",
-		Size:     4530224,
-		GzSize:   2514259,
-		SHA256:   "26d9d92c5cd3610734e2b227a259cb406e23fedf2487dc9ade15ba7195ed840c",
-		GzSHA256: "67acf2cc00b5d675b94c64f7471fee8f3a8ac5c63656a7fdbeb207b02d533412",
+		Asset:    "darwin-arm64-libmpv.tar.gz",
+		Size:     41643451,
+		GzSize:   18430469,
+		SHA256:   "39b871b41c84a52593b05267867ba7f2109c78bfe493cb9d1cf33f36c0d552d3",
+		GzSHA256: "29af857d10e053accf6eb18ea9a83bd262b562a66867c54d26fdba24b473276e",
+		Bundle:   true,
+		URL:      "https://github.com/dustPyrotechnic/mygo-cloudmusic/releases/download/libmpv-macos-v1/darwin-arm64-libmpv.tar.gz",
 	},
 	"darwin-amd64": {
 		Name:     "libmpv.dylib",
-		Asset:    "darwin-amd64-libmpv.dylib.gz",
-		Size:     4548336,
-		GzSize:   2570474,
-		SHA256:   "dee683496f915310374e4d19226ff02bcdfcf214e1aeaec749f81bde40a0370e",
-		GzSHA256: "912b1dedba439a8c7da7ec0fc20954a998e691ed0b7f7d3634bae6c9e3797a73",
+		Asset:    "darwin-amd64-libmpv.tar.gz",
+		Size:     48265243,
+		GzSize:   20344261,
+		SHA256:   "7f615faeda1946dc6d6cae13ddb4a79a287eb36572d26ade82f34095c36589d5",
+		GzSHA256: "1e1ed5efc30ada2c766161d0856652bdaaf44a6b81d7c95798d1cc365714ffca",
+		Bundle:   true,
+		URL:      "https://github.com/dustPyrotechnic/mygo-cloudmusic/releases/download/libmpv-macos-v1/darwin-amd64-libmpv.tar.gz",
 	},
 }

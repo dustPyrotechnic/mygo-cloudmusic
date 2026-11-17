@@ -12,3 +12,7 @@ func openLibrary(path string) (uintptr, error) {
 func librarySymbol(h uintptr, name string) (uintptr, error) {
 	return syscall.GetProcAddress(syscall.Handle(h), name)
 }
+
+func closeLibrary(h uintptr) error {
+	return syscall.FreeLibrary(syscall.Handle(h))
+}
